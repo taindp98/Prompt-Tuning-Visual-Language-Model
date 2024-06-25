@@ -1,9 +1,4 @@
 #!/bin/bash
-export WORKDIR=./
-export PYTHONPATH="$WORKDIR:$PYTHONPATH"
-export CUDA_VISIBLE_DEVICES=1
-# cd ..
-
 # custom config
 DATA=/netscratch/duynguyen/Research/ACML_TMLR_2024/DATA_PLOT
 TRAINER=TCP
