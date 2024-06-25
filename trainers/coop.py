@@ -52,8 +52,10 @@ class TextEncoder(nn.Module):
 
         # x.shape = [batch_size, n_ctx, transformer.width]
         # take features from the eot embedding (eot_token is the highest number in each sequence)
-        x = x[torch.arange(x.shape[0]),
-              tokenized_prompts.argmax(dim=-1)] @ self.text_projection
+        x = (
+            x[torch.arange(x.shape[0]), tokenized_prompts.argmax(dim=-1)]
+            @ self.text_projection
+        )
 
         return x
 
@@ -68,7 +70,9 @@ class PromptLearner(nn.Module):
         ctx_dim = clip_model.ln_final.weight.shape[0]
         clip_imsize = clip_model.visual.input_resolution
         cfg_imsize = cfg.INPUT.SIZE[0]
-        assert cfg_imsize == clip_imsize, f"cfg_imsize ({cfg_imsize}) must equal to clip_imsize ({clip_imsize})"
+        assert (
+            cfg_imsize == clip_imsize
+        ), f"cfg_imsize ({cfg_imsize}) must equal to clip_imsize ({clip_imsize})"
 
         # if ctx_init:
         #     # use given words to initialize context vectors
@@ -85,7 +89,9 @@ class PromptLearner(nn.Module):
             ctx_init = ctx_init.replace("_", " ")
             prompt_n_ctx = len(ctx_init.split(" "))
 
-            assert n_ctx >= prompt_n_ctx, f"#tokens ({n_ctx}) should larger equal than #initial prompt tokens ({prompt_n_ctx}, {ctx_init})"
+            assert (
+                n_ctx >= prompt_n_ctx
+            ), f"#tokens ({n_ctx}) should larger equal than #initial prompt tokens ({prompt_n_ctx}, {ctx_init})"
 
             prompt = clip.tokenize(ctx_init)
             with torch.no_grad():
@@ -93,8 +99,9 @@ class PromptLearner(nn.Module):
 
             ctx_vectors = torch.zeros(n_ctx, ctx_dim, dtype=dtype)
 
-            ctx_vectors[n_ctx - prompt_n_ctx:, :] = embedding[0, 1:1 +
-                                                              prompt_n_ctx, :]
+            ctx_vectors[n_ctx - prompt_n_ctx :, :] = embedding[
+                0, 1 : 1 + prompt_n_ctx, :
+            ]
             prompt_prefix = " ".join(["X"] * (n_ctx - prompt_n_ctx))
             prompt_prefix = f"{prompt_prefix} {ctx_init}"
         else:
@@ -119,15 +126,13 @@ class PromptLearner(nn.Module):
 
         tokenized_prompts = torch.cat([clip.tokenize(p) for p in prompts])
         with torch.no_grad():
-            embedding = clip_model.token_embedding(tokenized_prompts).type(
-                dtype)
+            embedding = clip_model.token_embedding(tokenized_prompts).type(dtype)
 
         # These token vectors will be saved when in save_model(),
         # but they should be ignored in load_model() as we want to use
         # those computed using the current class names
         self.register_buffer("token_prefix", embedding[:, :1, :])  # SOS
-        self.register_buffer("token_suffix",
-                             embedding[:, 1 + n_ctx:, :])  # CLS, EOS
+        self.register_buffer("token_suffix", embedding[:, 1 + n_ctx :, :])  # CLS, EOS
 
         self.n_cls = n_cls
         self.n_ctx = n_ctx
@@ -158,11 +163,11 @@ class PromptLearner(nn.Module):
             prompts = []
             for i in range(self.n_cls):
                 name_len = self.name_lens[i]
-                prefix_i = prefix[i:i + 1, :, :]
-                class_i = suffix[i:i + 1, :name_len, :]
-                suffix_i = suffix[i:i + 1, name_len:, :]
-                ctx_i_half1 = ctx[i:i + 1, :half_n_ctx, :]
-                ctx_i_half2 = ctx[i:i + 1, half_n_ctx:, :]
+                prefix_i = prefix[i : i + 1, :, :]
+                class_i = suffix[i : i + 1, :name_len, :]
+                suffix_i = suffix[i : i + 1, name_len:, :]
+                ctx_i_half1 = ctx[i : i + 1, :half_n_ctx, :]
+                ctx_i_half2 = ctx[i : i + 1, half_n_ctx:, :]
                 prompt = torch.cat(
                     [
                         prefix_i,  # (1, 1, dim)
@@ -180,10 +185,10 @@ class PromptLearner(nn.Module):
             prompts = []
             for i in range(self.n_cls):
                 name_len = self.name_lens[i]
-                prefix_i = prefix[i:i + 1, :, :]
-                class_i = suffix[i:i + 1, :name_len, :]
-                suffix_i = suffix[i:i + 1, name_len:, :]
-                ctx_i = ctx[i:i + 1, :, :]
+                prefix_i = prefix[i : i + 1, :, :]
+                class_i = suffix[i : i + 1, :name_len, :]
+                suffix_i = suffix[i : i + 1, name_len:, :]
+                ctx_i = ctx[i : i + 1, :, :]
                 prompt = torch.cat(
                     [
                         prefix_i,  # (1, 1, dim)
@@ -241,10 +246,8 @@ class CustomCLIP(nn.Module):
         tokenized_prompts = self.tokenized_prompts
         text_features = self.text_encoder(prompts, tokenized_prompts)
 
-        image_features = image_features / image_features.norm(dim=-1,
-                                                              keepdim=True)
-        text_features = text_features / text_features.norm(dim=-1,
-                                                           keepdim=True)
+        image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+        text_features = text_features / text_features.norm(dim=-1, keepdim=True)
 
         logit_scale = self.logit_scale.exp()
         logits = logit_scale * image_features @ text_features.t()
@@ -259,6 +262,7 @@ class CoOp(TrainerX):
     Learning to Prompt for Vision-Language Models
     https://arxiv.org/abs/2109.01134
     """
+
     def check_cfg(self, cfg):
         assert cfg.TRAINER.COOP.PREC in ["fp16", "fp32", "amp"]
 
@@ -282,15 +286,15 @@ class CoOp(TrainerX):
                 param.requires_grad_(False)
 
         if cfg.MODEL.INIT_WEIGHTS:
-            load_pretrained_weights(self.model.prompt_learner,
-                                    cfg.MODEL.INIT_WEIGHTS)
+            load_pretrained_weights(self.model.prompt_learner, cfg.MODEL.INIT_WEIGHTS)
 
         self.model.to(self.device)
         # NOTE: only give prompt_learner to the optimizer
         self.optim = build_optimizer(self.model.prompt_learner, cfg.OPTIM)
         self.sched = build_lr_scheduler(self.optim, cfg.OPTIM)
-        self.register_model("prompt_learner", self.model.prompt_learner,
-                            self.optim, self.sched)
+        self.register_model(
+            "prompt_learner", self.model.prompt_learner, self.optim, self.sched
+        )
 
         self.scaler = GradScaler() if cfg.TRAINER.COOP.PREC == "amp" else None
 
@@ -298,9 +302,7 @@ class CoOp(TrainerX):
         # big, which slows down the copy operation in DataParallel
         device_count = torch.cuda.device_count()
         if device_count > 1:
-            print(
-                f"Multiple GPUs detected (n_gpus={device_count}), use all of them!"
-            )
+            print(f"Multiple GPUs detected (n_gpus={device_count}), use all of them!")
             self.model = nn.DataParallel(self.model)
 
     def forward_backward(self, batch):
@@ -339,9 +341,7 @@ class CoOp(TrainerX):
 
     def load_model(self, directory, epoch=None):
         if not directory:
-            print(
-                "Note that load_model() is skipped as no pretrained model is given"
-            )
+            print("Note that load_model() is skipped as no pretrained model is given")
             return
 
         names = self.get_model_names()
@@ -356,8 +356,7 @@ class CoOp(TrainerX):
             model_path = osp.join(directory, name, model_file)
 
             if not osp.exists(model_path):
-                raise FileNotFoundError(
-                    'Model not found at "{}"'.format(model_path))
+                raise FileNotFoundError('Model not found at "{}"'.format(model_path))
 
             checkpoint = load_checkpoint(model_path)
             state_dict = checkpoint["state_dict"]
@@ -370,7 +369,9 @@ class CoOp(TrainerX):
             if "token_suffix" in state_dict:
                 del state_dict["token_suffix"]
 
-            print("Loading weights to {} "
-                  'from "{}" (epoch = {})'.format(name, model_path, epoch))
+            print(
+                "Loading weights to {} "
+                'from "{}" (epoch = {})'.format(name, model_path, epoch)
+            )
             # set strict=False
             self._models[name].load_state_dict(state_dict, strict=False)

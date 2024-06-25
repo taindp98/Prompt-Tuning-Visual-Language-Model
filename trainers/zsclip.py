@@ -50,16 +50,14 @@ class ZeroshotCLIP(TrainerX):
 
         with torch.no_grad():
             text_features = clip_model.encode_text(prompts)
-            text_features = text_features / text_features.norm(dim=-1,
-                                                               keepdim=True)
+            text_features = text_features / text_features.norm(dim=-1, keepdim=True)
 
         self.text_features = text_features
         self.clip_model = clip_model
 
     def model_inference(self, image):
         image_features = self.clip_model.encode_image(image)
-        image_features = image_features / image_features.norm(dim=-1,
-                                                              keepdim=True)
+        image_features = image_features / image_features.norm(dim=-1, keepdim=True)
         logit_scale = self.clip_model.logit_scale.exp()
         logits = logit_scale * image_features @ self.text_features.t()
         return logits
@@ -93,15 +91,14 @@ class ZeroshotCLIP2(ZeroshotCLIP):
         mean_text_features = 0
         for i, temp in enumerate(self.templates):
             prompts = [temp.format(c.replace("_", " ")) for c in classnames]
-            prompts = torch.cat([clip.tokenize(p)
-                                 for p in prompts]).to(self.device)
+            prompts = torch.cat([clip.tokenize(p) for p in prompts]).to(self.device)
             text_features = clip_model.encode_text(prompts)
-            text_features = text_features / text_features.norm(dim=-1,
-                                                               keepdim=True)
+            text_features = text_features / text_features.norm(dim=-1, keepdim=True)
             mean_text_features = mean_text_features + text_features
         mean_text_features = mean_text_features / num_temp
         mean_text_features = mean_text_features / mean_text_features.norm(
-            dim=-1, keepdim=True)
+            dim=-1, keepdim=True
+        )
 
         self.text_features = mean_text_features
         self.clip_model = clip_model

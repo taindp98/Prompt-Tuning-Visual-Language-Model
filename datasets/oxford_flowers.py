@@ -20,50 +20,43 @@ class OxfordFlowers(DatasetBase):
         self.dataset_dir = os.path.join(root, self.dataset_dir)
         self.image_dir = os.path.join(self.dataset_dir, "jpg")
         self.label_file = os.path.join(self.dataset_dir, "imagelabels.mat")
-        self.lab2cname_file = os.path.join(self.dataset_dir,
-                                           "cat_to_name.json")
-        self.split_path = os.path.join(self.dataset_dir,
-                                       "split_zhou_OxfordFlowers.json")
-        self.split_fewshot_dir = os.path.join(self.dataset_dir,
-                                              "split_fewshot")
+        self.lab2cname_file = os.path.join(self.dataset_dir, "cat_to_name.json")
+        self.split_path = os.path.join(
+            self.dataset_dir, "split_zhou_OxfordFlowers.json"
+        )
+        self.split_fewshot_dir = os.path.join(self.dataset_dir, "split_fewshot")
         mkdir_if_missing(self.split_fewshot_dir)
 
         if os.path.exists(self.split_path):
-            train, val, test = OxfordPets.read_split(self.split_path,
-                                                     self.image_dir)
+            train, val, test = OxfordPets.read_split(self.split_path, self.image_dir)
         else:
             train, val, test = self.read_data()
-            OxfordPets.save_split(train, val, test, self.split_path,
-                                  self.image_dir)
+            OxfordPets.save_split(train, val, test, self.split_path, self.image_dir)
 
         num_shots = cfg.DATASET.NUM_SHOTS
         if num_shots >= 1:
             seed = cfg.SEED
-            preprocessed = os.path.join(self.split_fewshot_dir,
-                                        f"shot_{num_shots}-seed_{seed}.pkl")
+            preprocessed = os.path.join(
+                self.split_fewshot_dir, f"shot_{num_shots}-seed_{seed}.pkl"
+            )
 
             if os.path.exists(preprocessed):
-                print(
-                    f"Loading preprocessed few-shot data from {preprocessed}")
+                print(f"Loading preprocessed few-shot data from {preprocessed}")
                 with open(preprocessed, "rb") as file:
                     data = pickle.load(file)
                     train, val = data["train"], data["val"]
             else:
-                train = self.generate_fewshot_dataset(train,
-                                                      num_shots=num_shots)
-                val = self.generate_fewshot_dataset(val,
-                                                    num_shots=min(
-                                                        num_shots, 4))
+                train = self.generate_fewshot_dataset(train, num_shots=num_shots)
+                val = self.generate_fewshot_dataset(val, num_shots=min(num_shots, 4))
                 data = {"train": train, "val": val}
                 print(f"Saving preprocessed few-shot data to {preprocessed}")
                 with open(preprocessed, "wb") as file:
                     pickle.dump(data, file, protocol=pickle.HIGHEST_PROTOCOL)
 
         subsample = cfg.DATASET.SUBSAMPLE_CLASSES
-        train, val, test = OxfordPets.subsample_classes(train,
-                                                        val,
-                                                        test,
-                                                        subsample=subsample)
+        train, val, test = OxfordPets.subsample_classes(
+            train, val, test, subsample=subsample
+        )
 
         super().__init__(train_x=train, val=val, test=test)
 
@@ -81,8 +74,9 @@ class OxfordFlowers(DatasetBase):
         def _collate(ims, y, c):
             items = []
             for im in ims:
-                item = Datum(impath=im, label=y - 1,
-                             classname=c)  # convert to 0-based label
+                item = Datum(
+                    impath=im, label=y - 1, classname=c
+                )  # convert to 0-based label
                 items.append(item)
             return items
 
@@ -97,8 +91,7 @@ class OxfordFlowers(DatasetBase):
             assert n_train > 0 and n_val > 0 and n_test > 0
             cname = lab2cname[str(label)]
             train.extend(_collate(impaths[:n_train], label, cname))
-            val.extend(_collate(impaths[n_train:n_train + n_val], label,
-                                cname))
-            test.extend(_collate(impaths[n_train + n_val:], label, cname))
+            val.extend(_collate(impaths[n_train : n_train + n_val], label, cname))
+            test.extend(_collate(impaths[n_train + n_val :], label, cname))
 
         return train, val, test

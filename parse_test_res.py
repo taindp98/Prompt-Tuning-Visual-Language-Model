@@ -48,6 +48,7 @@ Run
 
 $ python tools/parse_test_res.py output/my_experiment --multi-exp
 """
+
 import re
 import numpy as np
 import os.path as osp
@@ -62,7 +63,7 @@ def compute_ci95(res):
 
 
 def parse_function(*metrics, directory="", args=None, end_signal=None):
-    #print(f"Parsing files in {directory}")
+    # print(f"Parsing files in {directory}")
     subdirs = listdir_nohidden(directory, sort=True)
 
     outputs = []
@@ -107,20 +108,20 @@ def parse_function(*metrics, directory="", args=None, end_signal=None):
                 msg += f"{key}: {value}. "
             if key != "file":
                 metrics_results[key].append(value)
-        #print(msg)
+        # print(msg)
 
     output_results = OrderedDict()
 
-    #print("===")
-    #print(f"Summary of directory: {directory}")
-    dir_sets = directory.split('/')
-    #print(dir_sets)
+    # print("===")
+    # print(f"Summary of directory: {directory}")
+    dir_sets = directory.split("/")
+    # print(dir_sets)
     for key, values in metrics_results.items():
         avg = np.mean(values)
         std = compute_ci95(values) if args.ci95 else np.std(values)
         print(f"* {dir_sets[2]} {dir_sets[3]} {key}: {avg:.2f}% +- {std:.2f}%")
         output_results[key] = avg
-    #print("===")
+    # print("===")
 
     return output_results
 
@@ -128,7 +129,7 @@ def parse_function(*metrics, directory="", args=None, end_signal=None):
 def main(args, end_signal):
     metric = {
         "name": args.keyword,
-        "regex": re.compile(fr"\* {args.keyword}: ([\.\deE+-]+)%"),
+        "regex": re.compile(rf"\* {args.keyword}: ([\.\deE+-]+)%"),
     }
 
     if args.multi_exp:
@@ -136,10 +137,9 @@ def main(args, end_signal):
 
         for directory in listdir_nohidden(args.directory, sort=True):
             directory = osp.join(args.directory, directory)
-            results = parse_function(metric,
-                                     directory=directory,
-                                     args=args,
-                                     end_signal=end_signal)
+            results = parse_function(
+                metric, directory=directory, args=args, end_signal=end_signal
+            )
 
             for key, value in results.items():
                 final_results[key].append(value)
@@ -150,28 +150,24 @@ def main(args, end_signal):
             print(f"* {key}: {avg:.2f}%")
 
     else:
-        parse_function(metric,
-                       directory=args.directory,
-                       args=args,
-                       end_signal=end_signal)
+        parse_function(
+            metric, directory=args.directory, args=args, end_signal=end_signal
+        )
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("directory", type=str, help="path to directory")
-    parser.add_argument("--ci95",
-                        action="store_true",
-                        help=r"compute 95\% confidence interval")
-    parser.add_argument("--test-log",
-                        action="store_true",
-                        help="parse test-only logs")
-    parser.add_argument("--multi-exp",
-                        action="store_true",
-                        help="parse multiple experiments")
-    parser.add_argument("--keyword",
-                        default="accuracy",
-                        type=str,
-                        help="which keyword to extract")
+    parser.add_argument(
+        "--ci95", action="store_true", help=r"compute 95\% confidence interval"
+    )
+    parser.add_argument("--test-log", action="store_true", help="parse test-only logs")
+    parser.add_argument(
+        "--multi-exp", action="store_true", help="parse multiple experiments"
+    )
+    parser.add_argument(
+        "--keyword", default="accuracy", type=str, help="which keyword to extract"
+    )
     args = parser.parse_args()
 
     end_signal = "Finished training"

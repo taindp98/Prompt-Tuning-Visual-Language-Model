@@ -18,10 +18,8 @@ class OxfordPets(DatasetBase):
         self.dataset_dir = os.path.join(root, self.dataset_dir)
         self.image_dir = os.path.join(self.dataset_dir, "images")
         self.anno_dir = os.path.join(self.dataset_dir, "annotations")
-        self.split_path = os.path.join(self.dataset_dir,
-                                       "split_zhou_OxfordPets.json")
-        self.split_fewshot_dir = os.path.join(self.dataset_dir,
-                                              "split_fewshot")
+        self.split_path = os.path.join(self.dataset_dir, "split_zhou_OxfordPets.json")
+        self.split_fewshot_dir = os.path.join(self.dataset_dir, "split_fewshot")
         mkdir_if_missing(self.split_fewshot_dir)
 
         if os.path.exists(self.split_path):
@@ -35,31 +33,25 @@ class OxfordPets(DatasetBase):
         num_shots = cfg.DATASET.NUM_SHOTS
         if num_shots >= 1:
             seed = cfg.SEED
-            preprocessed = os.path.join(self.split_fewshot_dir,
-                                        f"shot_{num_shots}-seed_{seed}.pkl")
+            preprocessed = os.path.join(
+                self.split_fewshot_dir, f"shot_{num_shots}-seed_{seed}.pkl"
+            )
 
             if os.path.exists(preprocessed):
-                print(
-                    f"Loading preprocessed few-shot data from {preprocessed}")
+                print(f"Loading preprocessed few-shot data from {preprocessed}")
                 with open(preprocessed, "rb") as file:
                     data = pickle.load(file)
                     train, val = data["train"], data["val"]
             else:
-                train = self.generate_fewshot_dataset(train,
-                                                      num_shots=num_shots)
-                val = self.generate_fewshot_dataset(val,
-                                                    num_shots=min(
-                                                        num_shots, 4))
+                train = self.generate_fewshot_dataset(train, num_shots=num_shots)
+                val = self.generate_fewshot_dataset(val, num_shots=min(num_shots, 4))
                 data = {"train": train, "val": val}
                 print(f"Saving preprocessed few-shot data to {preprocessed}")
                 with open(preprocessed, "wb") as file:
                     pickle.dump(data, file, protocol=pickle.HIGHEST_PROTOCOL)
 
         subsample = cfg.DATASET.SUBSAMPLE_CLASSES
-        train, val, test = self.subsample_classes(train,
-                                                  val,
-                                                  test,
-                                                  subsample=subsample)
+        train, val, test = self.subsample_classes(train, val, test, subsample=subsample)
 
         super().__init__(train_x=train, val=val, test=test)
 
@@ -135,9 +127,7 @@ class OxfordPets(DatasetBase):
             out = []
             for impath, label, classname in items:
                 impath = os.path.join(path_prefix, impath)
-                item = Datum(impath=impath,
-                             label=int(label),
-                             classname=classname)
+                item = Datum(impath=impath, label=int(label), classname=classname)
                 out.append(item)
             return out
 
@@ -187,9 +177,11 @@ class OxfordPets(DatasetBase):
             for item in dataset:
                 if item.label not in selected:
                     continue
-                item_new = Datum(impath=item.impath,
-                                 label=relabeler[item.label],
-                                 classname=item.classname)
+                item_new = Datum(
+                    impath=item.impath,
+                    label=relabeler[item.label],
+                    classname=item.classname,
+                )
                 dataset_new.append(item_new)
             output.append(dataset_new)
 
