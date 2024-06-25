@@ -22,6 +22,9 @@ import numpy as np
 import copy
 import clip.clip as clip_ori
 
+from torch_sinkhorn.problem import Epsilon
+from torch_sinkhorn.sinkhorn import Sinkhorn, LinearProblem
+
 
 def load_clip_to_cpu(cfg):
     backbone_name = cfg.MODEL.BACKBONE.NAME
@@ -37,7 +40,6 @@ def load_clip_to_cpu(cfg):
         state_dict = torch.load(model_path, map_location="cpu")
 
     model = clip.build_model(state_dict or model.state_dict())
-
     return model
 
 
@@ -239,8 +241,11 @@ from scipy.optimize import linear_sum_assignment
 
 
 class CustomCLIP(nn.Module):
+    use_tcp: bool = True
+
     def __init__(self, cfg, classnames, clip_model):
         super().__init__()
+        self.n_cls = len(classnames)
         self.prompt_learner = PromptLearner(cfg, classnames, clip_model)
         self.tokenized_prompts = self.prompt_learner.tokenized_prompts
         self.ori_embedding = self.prompt_learner.text_features
@@ -251,9 +256,81 @@ class CustomCLIP(nn.Module):
         self.domain_sim = -1
         self.domain_sim_src = -1
         self.weight = cfg.TRAINER.COOP.W
+        self.N = 1  ## global only
+        self.tau_a = 1.0
+        self.tau_b = 0.5
+
+    def _forward_ot(self, image: torch.Tensor, label):
+        """
+        b: batch_size
+        M: image feature shape
+        """
+        b = image.shape[0]
+        image_features = self.image_encoder.forward_feature(
+            image.type(self.dtype)
+        )
+        # print(f"image_features: {image_features.shape}")
+
+        image_feature_pool = image_features[0]  # [128, 1024]
+        image_features = image_features[1:]  # [49, 128, 1024]
+        M = image_features.shape[0]  # 49
+        self.d = image_features.shape[-1]  # 1024
+
+        tokenized_prompts = self.tokenized_prompts
+        logit_scale = self.logit_scale.exp()
+
+        prompts, class_prompt = self.prompt_learner()
+        # text_features = self.text_encoder(prompts, tokenized_prompts) # [400, 1024]
+        text_features = self.text_encoder(
+            prompts, class_prompt, self.weight, tokenized_prompts.detach()
+        )
+        text_features = text_features.contiguous().view(self.N, self.n_cls, self.d)
+        text_feature_pool = text_features.mean(dim=0)  # [100, 1024]
+        text_features = F.normalize(text_features, dim=2)  # [4, 100, 1024]
+        text_feature_pool = F.normalize(text_feature_pool, dim=1)  # [100, 1024]
+        sim = torch.einsum(
+            "mbd,ncd->mnbc", image_features, text_features
+        ).contiguous()  # [49, 4, 128, 100]. We can think of this matrix as holder of all cost matrix C size [49,4] for each class, for each image. (see Algorithm A1 line 5)
+        sim = sim.view(M, self.N, b * self.n_cls)
+        sim = sim.permute(2, 0, 1)
+        wdist = 1.0 - sim  # [12800, 49,4]
+
+        with torch.no_grad():
+            # KK = torch.exp(-wdist / self.eps)
+            # T = self.Sinkhorn(KK,xx,yy)
+            epsilon = Epsilon(0.01, init=1.0, decay=0.5)
+            ot_prob = LinearProblem(
+                wdist, epsilon=epsilon, tau_a=self.tau_a, tau_b=self.tau_b
+            )
+            sinkhorn = Sinkhorn(lse_mode=True, use_danskin=True)
+            sol = sinkhorn(ot_prob)
+            T = sol[0].matrix  # [12800, 49,4]
+        if torch.isnan(T).any():
+            return None
+
+        sim_op = torch.sum(T * sim, dim=(1, 2))
+        sim_op = sim_op.contiguous().view(b, self.n_cls)  # [128,100]
+        logit_scale = self.logit_scale.exp()
+        logits = logit_scale * image_feature_pool @ text_feature_pool.t()
+        logits = logit_scale * sim_op
+
+        if self.prompt_learner.training:
+            loss = F.cross_entropy(logits, label)
+            return logits, loss
+        else:
+            return logits
 
     def forward(self, image, label=None):
-        image_features = self.image_encoder(image.type(self.dtype))
+        if self.use_tcp:
+            return self._forward_tcp(image, label)
+        else:
+            return self._forward_ot(image, label)
+
+    def _forward_tcp(self, image, label):
+
+        image_features = self.image_encoder(
+            image.type(self.dtype)
+        )  ## vit: [32, 512] | rn50: [128, 1024]
         text_features_old = self.ori_embedding
         cos = torch.nn.CosineSimilarity(dim=1, eps=1e-07)
         text_features_old = text_features_old / text_features_old.norm(

@@ -1,15 +1,15 @@
 #!/bin/bash
 export WORKDIR=./
 export PYTHONPATH="$WORKDIR:$PYTHONPATH"
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=1
 # cd ..
 
 # custom config
 DATA=/raid/trungng/DATA_PLOT
 TRAINER=TCP
-WEIGHT=1.0
+WEIGHT=1.0 
 
-CFG=vit_b16_ep100_ctxv1
+CFG=vit_b16_ep100_ctxv1    ## vit_b16_ep100_ctxv1 rn50
 CTP=end  # class token position (end or middle)
 NCTX=4  # number of context tokens  NOTE: NCTX=16
 SHOTS=4  # number of shots (1, 2, 4, 8, 16)
@@ -18,7 +18,7 @@ FOLDER=output
 
 for DATASET in food101
 do
-for SEED in 1 2 3
+for SEED in 1
 do
     DIR=${FOLDER}/${DATASET}/fewshot_exp_${NCTX}/shots_${SHOTS}_${WEIGHT}/${TRAINER}/${CFG}/seed${SEED}
     # if [ -d "$DIR" ]; then

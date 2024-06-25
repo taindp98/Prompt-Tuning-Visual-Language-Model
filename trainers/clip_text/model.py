@@ -113,6 +113,55 @@ class AttentionPool2d(nn.Module):
         return x[0]
 
 
+class AttentionPool2d_NoFlat(nn.Module):
+    def __init__(
+        self, spacial_dim: int, embed_dim: int, num_heads: int, output_dim: int = None
+    ):
+        super().__init__()
+        self.positional_embedding = nn.Parameter(
+            torch.randn(spacial_dim**2 + 1, embed_dim) / embed_dim**0.5
+        )
+        self.k_proj = nn.Linear(embed_dim, embed_dim)
+        self.q_proj = nn.Linear(embed_dim, embed_dim)
+        self.v_proj = nn.Linear(embed_dim, embed_dim)
+        self.c_proj = nn.Linear(embed_dim, output_dim or embed_dim)
+        self.num_heads = num_heads
+        self.embed_dim = embed_dim
+        self.spacial_dim = spacial_dim
+
+    def forward(self, x):
+        x = x.reshape(x.shape[0], x.shape[1], x.shape[2] * x.shape[3]).permute(
+            2, 0, 1
+        )  # NCHW -> (HW)NC
+        x = torch.cat([x.mean(dim=0, keepdim=True), x], dim=0)  # (HW+1)NC
+        x = x + self.positional_embedding[:, None, :].to(x.dtype)  # (HW+1)NC
+        x, _ = F.multi_head_attention_forward(
+            query=x,
+            key=x,
+            value=x,
+            embed_dim_to_check=x.shape[-1],
+            num_heads=self.num_heads,
+            q_proj_weight=self.q_proj.weight,
+            k_proj_weight=self.k_proj.weight,
+            v_proj_weight=self.v_proj.weight,
+            in_proj_weight=None,
+            in_proj_bias=torch.cat(
+                [self.q_proj.bias, self.k_proj.bias, self.v_proj.bias]
+            ),
+            bias_k=None,
+            bias_v=None,
+            add_zero_attn=False,
+            dropout_p=0,
+            out_proj_weight=self.c_proj.weight,
+            out_proj_bias=self.c_proj.bias,
+            use_separate_proj_weight=True,
+            training=self.training,
+            need_weights=False,
+        )
+
+        return x
+
+
 class ModifiedResNet(nn.Module):
     """
     A ResNet class that is similar to torchvision's but contains the following changes:
@@ -148,9 +197,13 @@ class ModifiedResNet(nn.Module):
         self.layer4 = self._make_layer(width * 8, layers[3], stride=2)
 
         embed_dim = width * 32  # the ResNet feature dimension
-        self.attnpool = AttentionPool2d(
+        # self.attnpool = AttentionPool2d(
+        #     input_resolution // 32, embed_dim, heads, output_dim
+        # )
+        self.attnpool = AttentionPool2d_NoFlat(
             input_resolution // 32, embed_dim, heads, output_dim
         )
+        
 
     def _make_layer(self, planes, blocks, stride=1):
         layers = [Bottleneck(self._inplanes, planes, stride)]
@@ -162,6 +215,27 @@ class ModifiedResNet(nn.Module):
         return nn.Sequential(*layers)
 
     def forward(self, x):
+        def stem(x):
+            for conv, bn in [
+                (self.conv1, self.bn1),
+                (self.conv2, self.bn2),
+                (self.conv3, self.bn3),
+            ]:
+                x = self.relu(bn(conv(x)))
+            x = self.avgpool(x)
+            return x
+
+        x = x.type(self.conv1.weight.dtype)
+        x = stem(x)
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
+        x = self.attnpool(x)
+
+        return x
+
+    def forward_feature(self, x):
         def stem(x):
             for conv, bn in [
                 (self.conv1, self.bn1),
@@ -382,7 +456,28 @@ class VisionTransformer(nn.Module):
 
         if self.proj is not None:
             x = x @ self.proj
+        return x
 
+    def forward_feature(self, x: torch.Tensor):
+        x = self.conv1(x)  # shape = [*, width, grid, grid]
+        x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
+        x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
+        x = torch.cat(
+            [
+                self.class_embedding.to(x.dtype)
+                + torch.zeros(
+                    x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device
+                ),
+                x,
+            ],
+            dim=1,
+        )  # shape = [*, grid ** 2 + 1, width]
+        x = x + self.positional_embedding.to(x.dtype)
+        x = self.ln_pre(x)
+        x = x.permute(1, 0, 2)  # NLD -> LND
+        x = self.transformer(x)
+        if self.proj is not None:
+            x = x @ self.proj
         return x
 
 
@@ -571,9 +666,10 @@ def build_model(state_dict: dict):
         )
         vision_patch_size = state_dict["visual.conv1.weight"].shape[-1]
         grid_size = round(
-            (state_dict["visual.positional_embedding"].shape[0] - 1) ** 0.5
+            (state_dict["visual.positional_embedding"].shape[0] - 1) ** 0.5 ## 0.5
         )
-        image_resolution = vision_patch_size * grid_size
+        # print(f"grid_size: {grid_size} | vision_patch_size: {vision_patch_size}")
+        image_resolution = vision_patch_size * grid_size    ## grid_size=14 | vision_patch_size=16
     else:
         counts: list = [
             len(
@@ -609,7 +705,6 @@ def build_model(state_dict: dict):
             if k.startswith(f"transformer.resblocks")
         )
     )
-
     model = CLIP(
         embed_dim,
         image_resolution,
