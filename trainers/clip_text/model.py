@@ -480,6 +480,106 @@ class VisionTransformer(nn.Module):
             x = x @ self.proj
         return x
 
+class VisionTransformer_PLOTPP(nn.Module):
+    def __init__(self, input_resolution: int, patch_size: int, width: int, layers: int, heads: int, output_dim: int):
+        super().__init__()
+        self.input_resolution = input_resolution
+        self.output_dim = output_dim
+        self.conv1 = nn.Conv2d(in_channels=3, out_channels=width, kernel_size=patch_size, stride=patch_size, bias=False)
+
+        scale = width ** -0.5
+        self.class_embedding = nn.Parameter(scale * torch.randn(width))
+        self.positional_embedding = nn.Parameter(scale * torch.randn((input_resolution // patch_size) ** 2 + 1, width))
+        self.ln_pre = LayerNorm(width)
+
+        self.transformer = Transformer(width, layers, heads)
+
+        self.ln_post = LayerNorm(width)
+        self.proj = nn.Parameter(scale * torch.randn(width, output_dim))
+
+    def forward(self, x: torch.Tensor, prompt):
+        b = x.shape[0]
+        x = self.conv1(x)  # shape = [*, width, grid, grid]
+        x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
+        x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
+        x = torch.cat([self.class_embedding.to(x.dtype) + torch.zeros(x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device), x], dim=1)  # shape = [*, grid ** 2 + 1, width]
+        x = x + self.positional_embedding.to(x.dtype)
+        
+        # After positional embeddings, we will attach prompts with the model, remember only those
+        # are trainable parameters here in whole image encoder.
+        if prompt.dim() >= 3:
+            x = x.unsqueeze(0).expand(prompt.shape[0],-1,-1,-1)
+            visual_ctx = prompt.unsqueeze(1).expand(-1,x.shape[1],-1,-1)
+            x = torch.cat([x, visual_ctx], dim=-2)
+            x = x.contiguous().view(x.shape[0]*x.shape[1], x.shape[2], x.shape[3])
+            x = self.ln_pre(x)
+            x = x.permute(1, 0, 2)  # NLD -> LND
+            x = self.transformer(x)
+            x = x.permute(1, 0, 2)  # LND -> NLD
+            x = x.contiguous().view(prompt.shape[0], b, x.shape[1], x.shape[-1])
+            x = self.ln_post(x[:,:, 0, :])
+        else: 
+            if self.VPT_shallow:
+                visual_ctx = prompt.expand(x.shape[0], -1, -1).half()
+                x = torch.cat([x, visual_ctx], dim=1)
+            else:
+                assert self.prompt_till_layer_visual == 0
+
+            # Normal code as before
+            x = self.ln_pre(x)
+
+            x = x.permute(1, 0, 2)  # NLD -> LND
+            x = self.transformer(x)
+            x = x.permute(1, 0, 2)  # LND -> NLD
+            
+            x = self.ln_post(x[:, 0, :])
+            
+        if self.proj is not None:
+            x = x @ self.proj
+
+        return x
+
+    def forward_feature(self, x: torch.Tensor, prompt):
+        b = x.shape[0]
+        x = self.conv1(x)  # shape = [*, width, grid, grid]
+        x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
+        x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
+        x = torch.cat([self.class_embedding.to(x.dtype) + torch.zeros(x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device), x], dim=1)  # shape = [*, grid ** 2 + 1, width]
+        x = x + self.positional_embedding.to(x.dtype)
+        
+        # After positional embeddings, we will attach prompts with the model, remember only those
+        # are trainable parameters here in whole image encoder.
+        if prompt.dim() >= 3:
+            x = x.unsqueeze(0).expand(prompt.shape[0],-1,-1,-1)
+            visual_ctx = prompt.unsqueeze(1).expand(-1,x.shape[1],-1,-1)
+            x = torch.cat([x, visual_ctx], dim=-2)
+            x = x.contiguous().view(x.shape[0]*x.shape[1], x.shape[2], x.shape[3])
+            x = self.ln_pre(x)
+            x = x.permute(1, 0, 2)  # NLD -> LND
+            x = self.transformer(x)
+            x = x.permute(1, 0, 2)  # LND -> NLD
+            x = x.contiguous().view(prompt.shape[0], b, x.shape[1], x.shape[-1])
+            x = self.ln_post(x[:,:, 0, :])
+        else: 
+            if self.VPT_shallow:
+                visual_ctx = prompt.expand(x.shape[0], -1, -1).half()
+                x = torch.cat([x, visual_ctx], dim=1)
+            else:
+                assert self.prompt_till_layer_visual == 0
+
+            # Normal code as before
+            x = self.ln_pre(x)
+
+            x = x.permute(1, 0, 2)  # NLD -> LND
+            x = self.transformer(x)
+            x = x.permute(1, 0, 2)  # LND -> NLD
+            x = self.ln_post(x[:, 0, :])
+        
+        if self.proj is not None:
+            x = x @ self.proj
+
+        return x
+
 
 class CLIP(nn.Module):
     def __init__(
@@ -512,7 +612,8 @@ class CLIP(nn.Module):
             )
         else:
             vision_heads = vision_width // 64
-            self.visual = VisionTransformer(
+            # self.visual = VisionTransformer(
+            self.visual = VisionTransformer_PLOTPP(
                 input_resolution=image_resolution,
                 patch_size=vision_patch_size,
                 width=vision_width,

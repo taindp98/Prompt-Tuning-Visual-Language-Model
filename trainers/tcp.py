@@ -107,6 +107,28 @@ class TextEncoder(nn.Module):
         )
         return x
 
+class TextEncoder_PLOTPP(nn.Module):
+    def __init__(self, clip_model):
+        super().__init__()
+        self.transformer = clip_model.transformer
+        self.positional_embedding = clip_model.positional_embedding # torch tensor size [77, 512]
+        self.ln_final = clip_model.ln_final
+        self.text_projection = clip_model.text_projection # torch tensor size [512, 1024]
+        self.dtype = clip_model.dtype
+
+    def forward(self, prompts, tokenized_prompts):
+        #prompt: torch tensor size [400, 77, 512]
+        #tokenized_prompts: torch tensor size [400, 77]
+        x = prompts + self.positional_embedding.type(self.dtype)
+        
+        x = x.permute(1, 0, 2)  # NLD -> LND
+        x = self.transformer(x)
+        x = x.permute(1, 0, 2)  # LND -> NLD, [400, 77, 512]
+        x = self.ln_final(x).type(self.dtype)
+        
+        x = x[torch.arange(x.shape[0]), tokenized_prompts.argmax(dim=-1)] @ self.text_projection
+
+        return x # torch tensor size [400, 1024]
 
 def _get_clones(module, N):
     return nn.ModuleList([copy.deepcopy(module) for i in range(N)])
@@ -118,6 +140,10 @@ class QuickGELU(nn.Module):
 
 
 class PromptLearner(nn.Module):
+
+    N: int = 4 ## number of text prompts
+    M: int = 4 ## number of vision prompts
+    
     def __init__(self, cfg, classnames, clip_model):
         super().__init__()
         n_cls = len(classnames)
@@ -153,13 +179,24 @@ class PromptLearner(nn.Module):
             else:
                 print("Initializing a generic context")
                 ctx_vectors = torch.empty(n_ctx, ctx_dim, dtype=dtype)
+
+            ## using 4 prompts
+            ctx_vectors = torch.empty(self.N, n_ctx, ctx_dim, dtype=dtype)
+
             nn.init.normal_(ctx_vectors, std=0.02)
             prompt_prefix = " ".join(["X"] * n_ctx)
+
+            ## number of context tokens in vision prompts
+            n_ctx_vision=4
+            ctx_vision_vectors = torch.empty(self.M, n_ctx_vision ,768, dtype=dtype)
+            nn.init.normal_(ctx_vision_vectors, std=0.02)
 
         print(f'Initial context: "{prompt_prefix}"')
         print(f"Number of context words (tokens): {n_ctx}")
 
         self.ctx = nn.Parameter(ctx_vectors)  # to be optimized
+
+        self.ctx_vision = nn.Parameter(ctx_vision_vectors) # parameters of vision prompt to be learned
 
         clip_model_ = load_clip_to_cpu(cfg)
         clip_model_.cuda()
@@ -190,9 +227,10 @@ class PromptLearner(nn.Module):
         classnames = [name.replace("_", " ") for name in classnames]
         temp = CUSTOM_TEMPLATES[cfg.DATASET.NAME]
         prompts = [temp.format(c.replace("_", " ")) for c in classnames]
-        print(prompts)
+        # print(prompts)
 
         tokenized_prompts = torch.cat([clip.tokenize(p) for p in prompts])
+        tokenized_prompts = tokenized_prompts.repeat(self.N,1) #[400,77], 1st prompt for 100 classes, 2nd prompt for 100 classes, ...
         with torch.no_grad():
             embedding = clip_model.token_embedding(tokenized_prompts).type(dtype)
 
@@ -200,9 +238,9 @@ class PromptLearner(nn.Module):
         self.register_buffer("token_suffix", embedding[:, 1 + n_ctx :, :])  # CLS, EOS
         self.n_cls = n_cls
         self.n_ctx = n_ctx
-        self.tokenized_prompts = tokenized_prompts  # torch.Tensor
         self.class_token_position = cfg.TRAINER.COOP.CLASS_TOKEN_POSITION
         self.prev_ctx = None
+        self.tokenized_prompts = tokenized_prompts  # torch.Tensor
 
     def forward(self):
         class_feature = self.meta_net(self.text_features)
@@ -210,16 +248,23 @@ class PromptLearner(nn.Module):
         prefix = self.token_prefix
         suffix = self.token_suffix
         ctx = self.ctx
-        ctx = ctx.unsqueeze(0).expand(self.n_cls, -1, -1)
-        prompt = torch.cat(
+        
+        ctx_vision = self.ctx_vision
+
+        if ctx.dim() == 3:
+            ctx = ctx.unsqueeze(0).expand(self.n_cls, -1, -1,-1)
+        ctx = ctx.permute(1, 0, 2, 3) #  N 100 16 512
+        ctx = ctx.contiguous().view(self.N*self.n_cls,self.n_ctx,ctx.shape[3])
+        prompts = torch.cat(
             [
-                prefix,  # (n_cls, 1, dim)
-                ctx,
-                suffix,  # (n_cls, *, dim)
+                prefix,  # (dim0, 1, dim)
+                ctx,  # (dim0, n_ctx, dim)
+                suffix,  # (dim0, *, dim)
             ],
             dim=1,
         )
-        return prompt, class_feature
+
+        return prompts, class_feature, ctx_vision
 
 
 class Adapter(nn.Module):
@@ -241,7 +286,8 @@ from scipy.optimize import linear_sum_assignment
 
 
 class CustomCLIP(nn.Module):
-    use_tcp: bool = True
+    use_tcp: bool = False
+    N: int = 4 ## number of prompts
 
     def __init__(self, cfg, classnames, clip_model):
         super().__init__()
@@ -250,50 +296,51 @@ class CustomCLIP(nn.Module):
         self.tokenized_prompts = self.prompt_learner.tokenized_prompts
         self.ori_embedding = self.prompt_learner.text_features
         self.image_encoder = clip_model.visual
-        self.text_encoder = TextEncoder(clip_model)
+        self.text_encoder = TextEncoder_PLOTPP(clip_model)
         self.logit_scale = clip_model.logit_scale
         self.dtype = clip_model.dtype
         self.domain_sim = -1
         self.domain_sim_src = -1
         self.weight = cfg.TRAINER.COOP.W
-        self.N = 1  ## global only
         self.tau_a = 1.0
         self.tau_b = 0.5
 
     def _forward_ot(self, image: torch.Tensor, label):
-        """
-        b: batch_size
-        M: image feature shape
-        """
+
         b = image.shape[0]
-        image_features = self.image_encoder.forward_feature(
-            image.type(self.dtype)
-        )
-        # print(f"image_features: {image_features.shape}")
-
-        image_feature_pool = image_features[0]  # [128, 1024]
-        image_features = image_features[1:]  # [49, 128, 1024]
-        M = image_features.shape[0]  # 49
-        self.d = image_features.shape[-1]  # 1024
-
+        prompts, class_prompt, vision_prompts = self.prompt_learner()
+        # print(f"vision_prompts: {vision_prompts.shape}")
         tokenized_prompts = self.tokenized_prompts
-        logit_scale = self.logit_scale.exp()
+        image_features = self.image_encoder(image.type(self.dtype), vision_prompts) ## [4, 8, 512]
+        # print(f"image_features: {image_features.shape}")
+        image_feature_pool = image_features.mean(dim=0)
+        M = image_features.shape[0]
+        self.d = image_features.shape[-1]
+        
+        # if self.dataset == 'ImageNet':
+        #     text_features = self.text_encoder(prompts.to(self.device), tokenized_prompts.to(self.device)) 
+        #     text_features = text_features.to(self.device)
+        #     text_features =  text_features.contiguous().view(self.N, self.n_cls, self.d)  
+        #     text_feature_pool = text_features.mean(dim=0)
+        # else:
+        #     text_features = self.text_encoder(prompts, tokenized_prompts).contiguous().view(self.N, self.n_cls, self.d)
+        #     text_feature_pool = text_features.mean(dim=0)
 
-        prompts, class_prompt = self.prompt_learner()
-        # text_features = self.text_encoder(prompts, tokenized_prompts) # [400, 1024]
-        text_features = self.text_encoder(
-            prompts, class_prompt, self.weight, tokenized_prompts.detach()
-        )
-        text_features = text_features.contiguous().view(self.N, self.n_cls, self.d)
-        text_feature_pool = text_features.mean(dim=0)  # [100, 1024]
-        text_features = F.normalize(text_features, dim=2)  # [4, 100, 1024]
-        text_feature_pool = F.normalize(text_feature_pool, dim=1)  # [100, 1024]
-        sim = torch.einsum(
-            "mbd,ncd->mnbc", image_features, text_features
-        ).contiguous()  # [49, 4, 128, 100]. We can think of this matrix as holder of all cost matrix C size [49,4] for each class, for each image. (see Algorithm A1 line 5)
-        sim = sim.view(M, self.N, b * self.n_cls)
-        sim = sim.permute(2, 0, 1)
-        wdist = 1.0 - sim  # [12800, 49,4]
+        # text_features = self.text_encoder(
+        #     prompts, class_prompt, self.weight, tokenized_prompts.detach()
+        # ).contiguous().view(self.N, self.n_cls, self.d)
+        text_features = self.text_encoder(prompts, tokenized_prompts).contiguous().view(self.N, self.n_cls, self.d)
+        # print(f"text_features: {text_features.shape}")
+
+        text_feature_pool = text_features.mean(dim=0)
+        image_features =  F.normalize(image_features, dim=2)  # N c d 
+        image_feature_pool = F.normalize(image_feature_pool, dim=1)
+        text_features = F.normalize(text_features, dim=2)
+        text_feature_pool = F.normalize(text_feature_pool, dim=1)
+        sim = torch.einsum('mbd,ncd->mnbc', image_features, text_features).contiguous()
+        sim = sim.view(M,self.N,b*self.n_cls)
+        sim = sim.permute(2,0,1)
+        wdist = 1.0 - sim
 
         with torch.no_grad():
             # KK = torch.exp(-wdist / self.eps)
